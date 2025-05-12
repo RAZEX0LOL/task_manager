@@ -3,13 +3,16 @@ import cors from "cors";
 import dotenv from "dotenv";
 import express from "express";
 import morgan from "morgan";
-import { errorHandler, routeNotFound } from "./middleware/errorMiddleware.js";
+import {errorHandler, routeNotFound} from "./middleware/errorMiddleware.js";
 import routes from "./routes/index.js";
 import dbConnection from "./utils/connectDB.js";
+import OpenAI from 'openai';
 
 dotenv.config();
 
 dbConnection();
+
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 const port = process.env.PORT || 5000;
 

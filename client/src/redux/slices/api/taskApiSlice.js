@@ -1,5 +1,5 @@
-import { TASKS_URL } from "../../../utils/contants";
-import { apiSlice } from "../apiSlice";
+import {TASKS_URL} from "../../../utils/contants";
+import {apiSlice} from "../apiSlice";
 
 export const postApiSlice = apiSlice.injectEndpoints({
   endpoints: (builder) => ({
@@ -8,6 +8,15 @@ export const postApiSlice = apiSlice.injectEndpoints({
         url: `${TASKS_URL}/create`,
         method: "POST",
         body: data,
+        credentials: "include",
+      }),
+    }),
+
+    suggestTask:builder.mutation({
+      query: ({title,description}) => ({
+        url:`${TASKS_URL}/suggest`,
+        method: "POST",
+        body: {title,description},
         credentials: "include",
       }),
     }),
@@ -121,4 +130,5 @@ export const {
   useGetDasboardStatsQuery,
   useChangeTaskStageMutation,
   useChangeSubTaskStatusMutation,
+  useSuggestTaskMutation,
 } = postApiSlice;

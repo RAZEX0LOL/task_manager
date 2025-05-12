@@ -4,8 +4,14 @@ import {useState} from "react";
 import {useForm} from "react-hook-form";
 import {BiImages} from "react-icons/bi";
 import {toast} from "sonner";
+import {useNavigate} from "react-router-dom";
 
-import {useCreateTaskMutation, useUpdateTaskMutation,} from "../../redux/slices/api/taskApiSlice";
+
+import {
+  useCreateTaskMutation,
+  useSuggestTaskMutation,
+  useUpdateTaskMutation,
+} from "../../redux/slices/api/taskApiSlice";
 import {dateFormatter} from "../../utils";
 import {app} from "../../utils/firebase";
 import Button from "../Button";
@@ -68,6 +74,9 @@ const AddTask = ({ open, setOpen, task }) => {
     formState: { errors },
   } = useForm({ defaultValues });
 
+  const navigate = useNavigate();
+  const [dupTasks, setDupTasks] = useState([]);
+  const [isDupModalOpen, setIsDupModalOpen] = useState(false);
   const [stage, setStage] = useState(task?.stage?.toUpperCase() || LISTS[0]);
   const [team, setTeam] = useState(task?.team || []);
   const [priority, setPriority] = useState(
@@ -76,44 +85,76 @@ const AddTask = ({ open, setOpen, task }) => {
   const [assets, setAssets] = useState([]);
   const [uploading, setUploading] = useState(false);
 
+  const [suggestTask] = useSuggestTaskMutation();
   const [createTask, { isLoading }] = useCreateTaskMutation();
   const [updateTask, { isLoading: isUpdating }] = useUpdateTaskMutation();
   const URLS = task?.assets ? [...task.assets] : [];
 
   const handleOnSubmit = async (data) => {
+    const { title, description } = data;
+
+    // 1. Вызов suggestTask: дубликаты, специализация, рекомендованный пользователь
+    let duplicates = [], specialization = "", suggestedUser = null;
+    try {
+      const suggestion = await suggestTask({ title, description }).unwrap();
+      ({ duplicates = [], specialization = "", suggestedUser = null } = suggestion);
+    } catch (err) {
+      console.error("Ошибка при получении suggestion:", err);
+      // продолжаем без дубликатов и без предсказаний
+    }
+
+    // 2. Если найдены дубликаты — сохраняем их в стейт и показываем модалку
+    if (Array.isArray(duplicates) && duplicates.length > 0) {
+      setDupTasks(duplicates);
+      setIsDupModalOpen(true);
+      return; // не создаём задачу, пока пользователь не разберётся с дубликатами
+    }
+
+    // 3. Подставляем специализацию
+    if (specialization) {
+      setTaskType(specialization);
+      toast.info(`Тип задачи: ${specialization.toUpperCase()}`);
+    }
+
+    // 4. Подставляем рекомендованного исполнителя
+    if (suggestedUser) {
+      setTeam([suggestedUser]);
+      toast.info(`Рекомендованный исполнитель: ${suggestedUser.name}`);
+    }
+
+    // 5. Загрузка файлов (если есть)
     for (const file of assets) {
       setUploading(true);
       try {
-        await uploadFile(file);
+        const url = await uploadFile(file);
+        setUploadedFileURLs(prev => [...prev, url]);
       } catch (error) {
-        console.error("Error uploading file:", error.message);
-        return;
-      } finally {
+        console.error("Ошибка при загрузке файла:", error);
         setUploading(false);
+        return; // прерываем, если загрузка не удалась
       }
+      setUploading(false);
     }
 
+    // 6. Сборка финального объекта и отправка create/update
     try {
-      const newData = {
+      const payload = {
         ...data,
-        assets: [...URLS, ...uploadedFileURLs],
+        type: taskType,
+        assets: uploadedFileURLs,
         team,
         stage,
         priority,
       };
-      console.log(data, newData);
-      const res = task?._id
-        ? await updateTask({ ...newData, _id: task._id }).unwrap()
-        : await createTask(newData).unwrap();
+      const res = task
+          ? await updateTask({ ...payload, _id: task._id }).unwrap()
+          : await createTask(payload).unwrap();
 
-      toast.success(res.message);
-
-      setTimeout(() => {
-        setOpen(false);
-      }, 500);
+      toast.success(res.message || "Задача сохранена");
+      setTimeout(() => setOpen(false), 300);
     } catch (err) {
-      console.log(err);
-      toast.error(err?.data?.message || err.error);
+      console.error("Ошибка при сохранении задачи:", err);
+      toast.error(err?.data?.message || err.error || "Не удалось сохранить задачу");
     }
   };
 
@@ -123,7 +164,7 @@ const AddTask = ({ open, setOpen, task }) => {
 
   return (
       <>
-        <ModalWrapper open={open} setOpen={setOpen}>
+        <ModalWrapper open={open} setOpen={setOpen} onClose={()=>setOpen(false)}>
           <form onSubmit={handleSubmit(handleOnSubmit)}>
             <Dialog.Title
                 as='h2'
@@ -244,6 +285,79 @@ const AddTask = ({ open, setOpen, task }) => {
             )}
           </form>
         </ModalWrapper>
+        {isDupModalOpen && (
+            <ModalWrapper
+                open={true}
+                onClose={() => setIsDupModalOpen(false)}
+            >
+              <div style={{ position: "relative", padding: 24 }}>
+                <button
+                    aria-label="Закрыть"
+                    onClick={() => setIsDupModalOpen(false)}
+                    style={{
+                      position: "absolute",
+                      top: 16,
+                      right: 16,
+                      background: "none",
+                      border: "none",
+                      fontSize: 20,
+                      cursor: "pointer",
+                      color: "#fff",
+                    }}
+                >
+                  ×
+                </button>
+
+                {/* Заголовок */}
+                <h3 style={{ marginTop: 0 }}>Найдено похожих задач</h3>
+                <hr />
+
+                <p>Похоже, такая задача уже существует. Можете перейти к ней:</p>
+                <div style={{ maxHeight: 300, overflowY: "auto" }}>
+                  {dupTasks.map((t) => (
+                      <div
+                          key={t._id}
+                          style={{
+                            display: "flex",
+                            justifyContent: "space-between",
+                            alignItems: "center",
+                            padding: 12,
+                            marginBottom: 12,
+                            border: "1px solid #555",
+                            borderRadius: 4,
+                          }}
+                      >
+                        <div>
+                          <strong>{t.title}</strong>
+                          <div style={{ fontSize: 12, color: "#aaa", marginTop: 4 }}>
+                            {t.description?.slice(0, 100)}…
+                          </div>
+                        </div>
+                        <button
+                            onClick={() => {
+                              navigate(`/task/${t._id}`);
+                              setIsDupModalOpen(false);
+                            }}
+                            style={{
+                              padding: "6px 12px",
+                              cursor: "pointer",
+                            }}
+                        >
+                          Перейти
+                        </button>
+                      </div>
+                  ))}
+                </div>
+
+                {/* Закрыть внизу */}
+                <div style={{ textAlign: "right", marginTop: 16 }}>
+                  <button onClick={() => setIsDupModalOpen(false)}>
+                    Закрыть
+                  </button>
+                </div>
+              </div>
+            </ModalWrapper>
+        )}
       </>
   );
 

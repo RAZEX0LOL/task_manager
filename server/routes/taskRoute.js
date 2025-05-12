@@ -8,14 +8,17 @@ import {
   getTask,
   getTasks,
   postTaskActivity,
+  suggestTaskAssignment,
   trashTask,
   updateSubTaskStage,
   updateTask,
-  updateTaskStage,
+  updateTaskStage
 } from "../controllers/taskController.js";
-import { isAdminRoute, protectRoute } from "../middleware/authMiddleware.js";
+import {isAdminRoute, protectRoute} from "../middleware/authMiddleware.js";
 
 const router = express.Router();
+
+router.post("/suggest", protectRoute, suggestTaskAssignment);
 
 router.post("/create", protectRoute, isAdminRoute, createTask);
 router.post("/duplicate/:id", protectRoute, isAdminRoute, duplicateTask);

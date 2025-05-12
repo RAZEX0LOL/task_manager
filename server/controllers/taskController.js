@@ -3,6 +3,37 @@ import Notice from "../models/notis.js";
 import Task from "../models/taskModel.js";
 import User from "../models/userModel.js";
 
+import OpenAI from "openai";
+
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+
+
+async function classifySpecialization(text) {
+  try {
+    const resp = await openai.chat.completions.create({
+      model: "gpt-3.5-turbo",
+      messages: [
+        { role: "system", content:
+              "You are an assistant that reads a task title and description and " +
+              "picks exactly one of: frontend, backend, qa, devops, design, general." },
+        { role: "user", content: text }
+      ]
+    });
+    const cls = resp.choices[0].message.content.trim().toLowerCase();
+    const allowed = ["frontend","backend","qa","devops","design","general"];
+    return allowed.includes(cls) ? cls : "general";
+  } catch (err) {
+    console.warn("OpenAI failed, fallback to keywords", err);
+    const t = text.toLowerCase();
+    if (/(react|vue|angular|ui|frontend)/.test(t)) return "frontend";
+    if (/(node|java|python|api|backend)/.test(t)) return "backend";
+    if (/(test|qa|automation)/.test(t))   return "qa";
+    if (/(devops|docker|k8s|ci\/cd)/.test(t)) return "devops";
+    if (/(design|figma|ux)/.test(t))       return "design";
+    return "general";
+  }
+}
+
 const createTask = asyncHandler(async (req, res) => {
   try {
     const { userId } = req.user;
@@ -442,6 +473,44 @@ const dashboardStatistics = asyncHandler(async (req, res) => {
     console.log(error);
     return res.status(400).json({ status: false, message: error.message });
   }
+});
+
+// проверка дубликатов + классификация + предложение исполнителя
+export const suggestTaskAssignment = asyncHandler(async (req, res) => {
+  const { title = "", description = "" } = req.body;
+
+  // 1) Поиск дубликатов (по title или description)
+  const dupFilter = [
+    { title: { $regex: new RegExp(title, "i") } },
+    { description: { $regex: new RegExp(title, "i") } },
+    { title: { $regex: new RegExp(description, "i") } },
+    { description: { $regex: new RegExp(description, "i") } },
+  ];
+  const duplicates = await Task.find({ $or: dupFilter })
+      .limit(5)
+      .populate("team", "name title role");
+
+  if (duplicates.length) {
+    return res.status(200).json({ duplicates });
+  }
+
+  // 2) Простая классификация по ключевым словам
+  const text = `${title}\n\n${description}`.trim();
+  const specialization = await classifySpecialization(text);
+
+  // 3) Выбор активного пользователя с наименьшим числом задач
+  const candidates = await User.find({ role: specialization, isActive: true })
+      .populate("tasks", "_id");
+  candidates.sort((a, b) => a.tasks.length - b.tasks.length);
+  const suggestedUser = candidates[0] || null;
+
+  res.status(200).json({
+    duplicates: [],
+    specialization,
+    suggestedUser: suggestedUser
+        ? { _id: suggestedUser._id, name: suggestedUser.name, role: suggestedUser.role }
+        : null,
+  });
 });
 
 export {
