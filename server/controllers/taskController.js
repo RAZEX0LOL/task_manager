@@ -475,41 +475,156 @@ const dashboardStatistics = asyncHandler(async (req, res) => {
   }
 });
 
-// проверка дубликатов + классификация + предложение исполнителя
+// // проверка дубликатов + классификация + предложение исполнителя
+// export const suggestTaskAssignment = asyncHandler(async (req, res) => {
+//   const { title = "", description = "" } = req.body;
+//
+//   // 1) Поиск дубликатов (по title или description)
+//   const dupFilter = [
+//     { title: { $regex: new RegExp(title, "i") } },
+//     { description: { $regex: new RegExp(title, "i") } },
+//     { title: { $regex: new RegExp(description, "i") } },
+//     { description: { $regex: new RegExp(description, "i") } },
+//   ];
+//   const duplicates = await Task.find({ $or: dupFilter })
+//       .limit(5)
+//       .populate("team", "name title role");
+//
+//   if (duplicates.length) {
+//     return res.status(200).json({ duplicates });
+//   }
+//
+//   // 2) Простая классификация по ключевым словам
+//   const text = `${title}\n\n${description}`.trim();
+//   const specialization = await classifySpecialization(text);
+//
+//   // 3) Выбор активного пользователя с наименьшим числом задач
+//   const candidates = await User.find({ role: specialization, isActive: true })
+//       .populate("tasks", "_id");
+//   candidates.sort((a, b) => a.tasks.length - b.tasks.length);
+//   const suggestedUser = candidates[0] || null;
+//
+//   res.status(200).json({
+//     duplicates: [],
+//     specialization,
+//     suggestedUser: suggestedUser
+//         ? { _id: suggestedUser._id, name: suggestedUser.name, role: suggestedUser.role }
+//         : null,
+//   });
+// });
+
+
 export const suggestTaskAssignment = asyncHandler(async (req, res) => {
   const { title = "", description = "" } = req.body;
 
-  // 1) Поиск дубликатов (по title или description)
-  const dupFilter = [
-    { title: { $regex: new RegExp(title, "i") } },
-    { description: { $regex: new RegExp(title, "i") } },
-    { title: { $regex: new RegExp(description, "i") } },
-    { description: { $regex: new RegExp(description, "i") } },
-  ];
-  const duplicates = await Task.find({ $or: dupFilter })
-      .limit(5)
-      .populate("team", "name title role");
+  // 1) Динамический фильтр дубликатов
+  const dupFilter = [];
+  if (title.trim()) {
+    dupFilter.push(
+        { title:       { $regex: new RegExp(title.trim(),       "i") } },
+        { description: { $regex: new RegExp(title.trim(),       "i") } }
+    );
+  }
+  if (description.trim()) {
+    dupFilter.push(
+        { title:       { $regex: new RegExp(description.trim(), "i") } },
+        { description: { $regex: new RegExp(description.trim(), "i") } }
+    );
+  }
 
+  let duplicates = [];
+  if (dupFilter.length) {
+    duplicates = await Task.find({ $or: dupFilter })
+        .limit(5)
+        .populate("team", "name title role");
+  }
   if (duplicates.length) {
     return res.status(200).json({ duplicates });
   }
 
-  // 2) Простая классификация по ключевым словам
-  const text = `${title}\n\n${description}`.trim();
-  const specialization = await classifySpecialization(text);
+  // 2) Классификация роли через OpenAI
+  const systemPrompt = `
+    Ты — ассистент, распределяющий задачи по ролям.
+    Выбери ровно одну роль из: Frontend, Backend, DevOps, Designer, QA.
+    Если ни одна не подходит — ответь "None".
+  `.trim();
+  const userPrompt = `
+    Title: ${title}
+    Description: ${description}
+  `.trim();
 
-  // 3) Выбор активного пользователя с наименьшим числом задач
-  const candidates = await User.find({ role: specialization, isActive: true })
-      .populate("tasks", "_id");
-  candidates.sort((a, b) => a.tasks.length - b.tasks.length);
-  const suggestedUser = candidates[0] || null;
+  let recommendedRole = "";
+  try {
+    const { choices } = await openai.chat.completions.create({
+      model:    "gpt-4o-mini",
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user",   content: userPrompt   }
+      ]
+    });
+    recommendedRole = choices[0].message.content.trim();
+  } catch (err) {
+    console.error("OpenAI error:", err);
+  }
 
+  // 3) Если роль не из списка — нет кандидатов
+  const allowed = ["Frontend","Backend","DevOps","Designer","QA"];
+  if (!allowed.includes(recommendedRole)) {
+    return res.status(200).json({
+      duplicates: [],
+      noCandidates: true
+    });
+  }
+
+  // 4) Подбор кандидатов и подсчет нагрузки
+  const WEIGHTS = { High: 3, Medium: 2, Low: 1 };
+  const now = new Date();
+
+  const candidates = await User.find({
+    role:     recommendedRole,
+    isActive: true
+  }).populate({
+    path:   "tasks",
+    select: "title priority date"    // вытягиваем поле date, а не dueDate
+  });
+
+  const scored = candidates.map(user => {
+    let loadScore = 0;
+    user.tasks.forEach(t => {
+      const w = WEIGHTS[t.priority] || 1;
+      if (t.date) {
+        const daysLeft = (new Date(t.date) - now) / (1000 * 60 * 60 * 24);
+        loadScore += daysLeft <= 0 ? w * 0.5 : w;
+      } else {
+        loadScore += w;
+      }
+    });
+    return { user, loadScore };
+  });
+
+  // 5) Сортировка и топ-3
+  const assigneeSuggestions = scored
+      .sort((a, b) => a.loadScore - b.loadScore)
+      .slice(0, 3)
+      .map(({ user }) => ({
+        _id:       user._id,
+        name:      user.name,
+        email:     user.email,
+        role:      user.role,
+        taskCount: user.tasks.length,
+        tasks:     user.tasks.map(t => ({
+          _id:      t._id,
+          title:    t.title,
+          priority: t.priority,
+          date:     t.date      // дедлайн теперь приходит в поле date
+        }))
+      }));
+
+  // 6) Ответ клиенту
   res.status(200).json({
     duplicates: [],
-    specialization,
-    suggestedUser: suggestedUser
-        ? { _id: suggestedUser._id, name: suggestedUser.name, role: suggestedUser.role }
-        : null,
+    recommendedRole,
+    assigneeSuggestions
   });
 });
 

@@ -25,6 +25,7 @@ const Tasks = () => {
 
   const status = params?.status || "";
 
+
   const { data, isLoading, refetch } = useGetAllTaskQuery({
     strQuery: status,
     isTrashed: "",
@@ -81,7 +82,12 @@ const Tasks = () => {
           )}
         </Tabs>
       </div>
-      <AddTask open={open} setOpen={setOpen} />
+
+      <AddTask
+          open={open}
+          setOpen={setOpen}
+          onCreated={refetch}
+      />
     </div>
   );
 };
